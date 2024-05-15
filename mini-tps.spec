@@ -6,7 +6,7 @@
 
 Name: mini-tps
 Version: 0.1
-Release: 173%{?dist}
+Release: 174%{?dist}
 Summary: Mini TPS - Test Package Sanity
 
 License: GPLv2
@@ -33,6 +33,9 @@ cat > %{buildroot}%{_sysconfdir}/%{yumcmd}/protected.d/mini-tps.conf <<EOF
 
 mini-tps
 openssh-server
+dnf5
+python3-dnf
+dnf-utils
 yum
 yum-utils
 EOF
@@ -70,6 +73,9 @@ install -pD -m 0755 profiles/fedora/prepare-system %{buildroot}%{_libexecdir}/mi
 
 
 %changelog
+* Wed May 15 2024 Jiri Popelka <jpopelka@redhat.com> - 0.1-174
+- Add dnf to protected packages
+
 * Tue May 07 2024 Jiri Popelka <jpopelka@redhat.com> - 0.1-173
 - More RHEL7-related changes
 
