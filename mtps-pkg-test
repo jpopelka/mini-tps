@@ -217,6 +217,47 @@ pkg_remove_any() {
     return $ret
 }
 
+explain_modular_filtering() {
+    local nevra="$1" && shift
+    local name="$1" && shift
+    cat <<EOF
+
+Package $nevra cannot be installed because it was filtered out by DNF modular filtering.
+
+This usually happens when a package with the same name (different version-release)
+is included in an enabled or default module stream.
+The RPM is present in the testing repo, but DNF hides it once compose module
+metadata is loaded. This is not an installability failure of the RPM itself.
+
+EOF
+    echo "Checking which module provides $name:"
+    "$YUMDNFCMD" module provides "$name" || :
+}
+
+# Run yum/dnf, print output, return WARN if modular filtering hid the package.
+# Usage: yum_run_or_warn_modular NEVRA NAME yum/dnf args...
+yum_run_or_warn_modular() {
+    local nevra="$1" && shift
+    local name="$1" && shift
+    local cmd_log
+    cmd_log="$(mktemp)"
+    "$@" 2>&1 | tee "$cmd_log"
+    # Shebang is bash -efu (no pipefail): the pipeline status is tee's, so take
+    # the yum/dnf status from PIPESTATUS[0].
+    local dnf_ret=${PIPESTATUS[0]}
+    if [ "$dnf_ret" -ne 0 ]; then
+        if grep -qF "filtered out by modular filtering for argument: ${name}" "$cmd_log"; then
+            explain_modular_filtering "$nevra" "$name"
+            rm -f "$cmd_log"
+            return $EXIT_CODE_WARN
+        fi
+        rm -f "$cmd_log"
+        return 1
+    fi
+    rm -f "$cmd_log"
+    return 0
+}
+
 pkg_install_if_absent() {
     local nevra="$1" && shift
     local name="$(from_nevra "$nevra" "name")"
@@ -225,7 +266,12 @@ pkg_install_if_absent() {
         debug "${FUNCNAME[0]}: package $name is present. Not installing $nevra."
         return 0
     fi
-    if ! "$YUMDNFCMD" -y install ${ALLOWERASING} "$nevra"; then
+    local ret=0
+    yum_run_or_warn_modular "$nevra" "$name" \
+        "$YUMDNFCMD" -y install "${ALLOWERASING}" "$nevra" || ret=$?
+    if [ "$ret" -eq $EXIT_CODE_WARN ]; then
+        return $EXIT_CODE_WARN
+    elif [ "$ret" -ne 0 ]; then
         echo "Installation of $nevra failed."
         echo "See $YUMDNFCMD command output above for more information."
         return 1
@@ -450,8 +496,12 @@ pkg_update_to_new_if_present() {
         debug "Installed package $installed_nevra_new is not older. Not updating."
         return 0
     fi
-    "$YUMDNFCMD" -y upgrade "$ALLOWERASING" "$nevra"
-    if pkg_is_absent "$nevra"; then
+    local ret=0
+    yum_run_or_warn_modular "$nevra" "$name" \
+        "$YUMDNFCMD" -y upgrade "${ALLOWERASING}" "$nevra" || ret=$?
+    if [ "$ret" -eq $EXIT_CODE_WARN ]; then
+        return $EXIT_CODE_WARN
+    elif [ "$ret" -ne 0 ] || pkg_is_absent "$nevra"; then
         echo "Could not update to: $nevra"
         return 1
     fi
@@ -677,10 +727,14 @@ case $TEST in
         else
             pkg_downgrade_if_present "$NEVRA"
         fi
-        if ! pkg_install_if_absent "$old_nevra"; then
+        pkg_install_if_absent "$old_nevra" || {
+            ret=$?
+            if [ "$ret" -eq $EXIT_CODE_WARN ]; then
+                exit $EXIT_CODE_WARN
+            fi
             echo "Failed to install $old_nevra. Skipping test."
             exit $EXIT_CODE_SKIP
-        fi
+        }
         # At this point pkg is installed, but can be many installonlypkg(foo) packages
         pkg_remove_any_newer "$NEVRA"
         msg_run "update" "$NEVRA"
@@ -706,10 +760,14 @@ case $TEST in
         fi
         echo "Older available package is: $old_nevra"
         pkg_update_to_new_if_present "$NEVRA"
-        if ! pkg_install_if_absent "$NEVRA"; then
+        pkg_install_if_absent "$NEVRA" || {
+            ret=$?
+            if [ "$ret" -eq $EXIT_CODE_WARN ]; then
+                exit $EXIT_CODE_WARN
+            fi
             echo "Failed to install $NEVRA. Skipping test."
             exit $EXIT_CODE_SKIP
-        fi
+        }
         pkg_remove_any_older "$NEVRA" # This is for installonlypkg(foo) packages, like kernel
         msg_run "downgrade" "$NEVRA"
         if [ -n "$CHECK_SCRIPTLETS" ]; then
@@ -721,7 +779,7 @@ case $TEST in
     remove)
         msg_prepare "removing" "$NEVRA"
         pkg_update_to_new_if_present "$NEVRA"
-        pkg_install_if_absent "$NEVRA" || exit 1
+        pkg_install_if_absent "$NEVRA" || exit $?
 
         # OSCI-4333: We have to check again if the package can be removed
         # now after we installed its latest version. It can happen that
